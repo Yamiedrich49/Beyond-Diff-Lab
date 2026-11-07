@@ -104,6 +104,175 @@ function nextLevel(){if(state.stage>=GAME_INFO[state.game].count){showHome();scr
 function feedback(g,value){state.ratings[g]=value;storeSet('ratings',state.ratings);$$('[data-rating]').forEach(b=>b.classList.toggle('sel',b.dataset.rating===value));tone('tap');toast('研究記録に保存しました')}
 function copyLog(){const txt=`BEYOND DIFF. LAB / PLAY TEST\n${GAMES.map(g=>`${GAME_INFO[g].name}: ${Math.min(GAME_INFO[g].count,(state.levels[g]||1)-1)}/${GAME_INFO[g].count} stages · 評価 ${({'love':'また遊びたい','ok':'まあまあ','no':'いまいち'})[state.ratings[g]]||'未評価'}`).join('\n')}\n${new Date().toLocaleDateString('ja-JP')}`;if(navigator.clipboard?.writeText)navigator.clipboard.writeText(txt).then(()=>toast('研究記録をコピーしました')).catch(()=>fallbackCopy(txt));else fallbackCopy(txt)}function fallbackCopy(txt){const x=document.createElement('textarea');x.value=txt;document.body.appendChild(x);x.select();document.execCommand('copy');x.remove();toast('研究記録をコピーしました')}
 function bindAll(root=document){root.querySelectorAll('button[data-game]').forEach(x=>x.onclick=()=>{tone('tap');enterGame(x.dataset.game);scrollTo({top:0,behavior:'smooth'})});root.querySelectorAll('[data-rating]').forEach(x=>x.onclick=()=>feedback(state.game,x.dataset.rating));root.querySelectorAll('[data-peel]').forEach(x=>x.onclick=()=>choosePeel(+x.dataset.peel));root.querySelectorAll('[data-turn]').forEach(x=>x.onclick=()=>doTriple(+x.dataset.turn));root.querySelectorAll('[data-input]').forEach(x=>x.onclick=()=>chooseInput(+x.dataset.input));root.querySelectorAll('[data-machine]').forEach(x=>x.onclick=()=>experGuess(+x.dataset.machine));root.querySelectorAll('[data-gate]').forEach(x=>{x.onclick=()=>toggleFlow(+x.dataset.gate);x.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();toggleFlow(+x.dataset.gate)}}});root.querySelectorAll('[data-action]').forEach(x=>x.onclick=()=>{const a=x.dataset.action;if(a==='home')showHome();else if(a==='sound'){state.muted=!state.muted;storeSet('muted',state.muted);if(!state.muted)tone('tap');if(state.screen==='home')showHome();else renderGame()}else if(a==='nextlevel')nextLevel();else if(a==='prev'&&state.stage>1)enterGame(state.game,state.stage-1);else if(a==='restart'){tone('tap');setStage();renderGame()}else if(a==='undo')undoTriple();else if(a==='peelrun')runPeel();else if(a==='experrun')experRun();else if(a==='experreset')experReset();else if(a==='flowrun')runFlow();else if(a==='copylog')copyLog()})}
+// FLOW SPLITTER v2 — explicit ball-by-ball simulation, no hidden merging rule.
+const FLOW_V2_POS={0:[180,43],1:[98,139],2:[262,139],3:[48,233],4:[312,233]};
+const FLOW_V2_COLORS=['#E98E76','#6AA8D7','#DDB75B'];
+const flowV2Mode=stage=>stage<=2?1:stage<=6?3:5;
+const flowV2Exits=n=>n===1?[91,269]:n===3?[49,138,222,311]:[26,87,145,215,273,334];
+const flowV2Y=n=>n===1?198:n===3?267:310;
+function flowV2Next(n,id,left){
+  if(n===1)return {bin:left?0:1};
+  if(id===0)return {gate:left?1:2};
+  if(n===3)return {bin:id===1?(left?0:1):(left?2:3)};
+  if(id===1)return left?{gate:3}:{bin:2};
+  if(id===2)return left?{bin:3}:{gate:4};
+  return {bin:id===3?(left?0:1):(left?4:5)};
+}
+function flowV2Counts(bins){return bins.map(a=>[0,1,2].map(k=>a.filter(v=>v===k).length))}
+function flowV2Signature(bins){return flowV2Counts(bins).map(a=>a.join(':')).join('|')}
+flowCalc = function(balls,bits,n=bits.length){
+  const spin=bits.map(Boolean),bins=Array.from({length:n+1},()=>[]),events=[];
+  for(let k=0;k<balls.length;k++){
+    const color=balls[k],hops=[];let gate=0,bin=-1;
+    while(gate!==null){
+      const left=spin[gate],next=flowV2Next(n,gate,left);
+      hops.push({gate,left});spin[gate]=!spin[gate];
+      if(next.gate!==undefined)gate=next.gate;
+      else {bin=next.bin;gate=null}
+    }
+    bins[bin].push(color);events.push({color,hops,bin,number:k});
+  }
+  return {bins,counts:flowV2Counts(bins),sig:flowV2Signature(bins),events,finalBits:spin};
+};
+function flowV2RandomStream(r,len,colors){
+  let balls=Array.from({length:len},()=>Math.floor(r()*colors));
+  if(new Set(balls).size<2)balls=balls.map((_,i)=>i%colors);
+  return balls;
+}
+makeFlow = function(stage){
+  const n=flowV2Mode(stage),r=rng(864191+stage*3307),len=stage<=2?stage+2:stage<=6?4+(stage%3)+Math.floor(stage/3):7+Math.floor((stage-7)/3),colors=stage<=7?2:3;
+  let pick=null,score=-Infinity;
+  for(let t=0;t<44;t++){
+    const balls=flowV2RandomStream(r,len,colors);
+    const choices=Array.from({length:1<<n},(_,mask)=>({mask,bits:Array.from({length:n},(_,i)=>!!(mask&(1<<i)))}));
+    for(const c of choices)c.out=flowCalc(balls,c.bits,n);
+    const groups=new Map();for(const c of choices){const a=groups.get(c.out.sig)||[];a.push(c);groups.set(c.out.sig,a)}
+    for(const [sig,goals] of groups){
+      const acceptable=goals.length<=(n===1?1:n===3?2:3);
+      if(!acceptable)continue;
+      for(const init of choices){
+        if(goals.includes(init))continue;
+        const dist=Math.min(...goals.map(g=>popcnt(init.mask^g.mask)));
+        const wanted=n===1?1:n===3?(stage<=4?1:2):(stage<=9?1:stage<=13?2:3);
+        let q=8-Math.abs(dist-wanted)*2+ (goals.length===1?2:0) + Math.min(groups.size,25)*.04;
+        if(n>1&&dist===1&&stage>9)q-=3;
+        q+=r()*.65;
+        if(q>score){score=q;pick={balls,bits:init.bits.slice(),goal:goals[0].out,solutionCount:goals.length,minimum:dist}}
+      }
+    }
+    if(pick&&score>10.2)break;
+  }
+  if(!pick){const balls=Array.from({length:len},(_,i)=>i%colors),bits=Array(n).fill(false);pick={balls,bits,goal:flowCalc(balls,Array(n).fill(true),n),solutionCount:1,minimum:1}}
+  return {...pick,n,cursor:0,liveBins:Array.from({length:n+1},()=>[]),liveBits:pick.bits.slice(),result:null,planned:null,runNonce:0};
+};
+function flowV2Dot(c,cls=''){return `<i class="flowv2-dot ${cls}" style="--dot:${FLOW_V2_COLORS[c]}" aria-hidden="true"></i>`}
+function flowV2BucketDots(a){return a.length?a.map(c=>flowV2Dot(c)).join(''):'<span class="flowv2-empty">·</span>'}
+function flowV2Wires(n){
+  const wires=[];
+  const link=(a,b)=>wires.push(`<path d="M ${a[0]} ${a[1]} L ${b[0]} ${b[1]}" class="flowv2-wire"/>`);
+  const entry=[180,7],root=FLOW_V2_POS[0];link(entry,root);
+  const finish=flowV2Exits(n),end=flowV2Y(n);
+  for(let id=0;id<n;id++)for(const left of [true,false]){
+    const dest=flowV2Next(n,id,left),from=FLOW_V2_POS[id];
+    link(from,dest.gate!==undefined?FLOW_V2_POS[dest.gate]:[finish[dest.bin],end]);
+  }
+  return wires.join('');
+}
+function flowV2Rotor(n,id,bit,disabled){const [x,y]=FLOW_V2_POS[id];return `<g class="flowv2-rotor ${disabled?'locked':''}" data-gate="${id}" role="button" tabindex="${disabled?-1:0}" aria-label="分岐${id+1}、最初は${bit?'左':'右'}へ"><circle class="flowv2-halo" cx="${x}" cy="${y}" r="27"/><circle class="flowv2-core" cx="${x}" cy="${y}" r="23"/><text class="flowv2-arrow" id="flowv2-arrow-${id}" x="${x}" y="${y+8}">${bit?'↙':'↘'}</text><circle class="flowv2-touch" cx="${x}" cy="${y}" r="30"/></g>`}
+flowBoard = function(){
+  const p=state.flow,active=p.cursor>0||state.playing,done=!!p.result,goals=p.goal.bins,n=p.n;
+  const current=done?p.result.bins:p.liveBins,exit=flowV2Exits(n),height=flowV2Y(n)+8;
+  const board=`<svg viewBox="0 0 360 ${height}" class="flowv2-svg" id="flowv2-svg" aria-label="左右交互に振り分ける分岐。丸い矢印をタップで変更">${flowV2Wires(n)}${Array.from({length:n},(_,i)=>flowV2Rotor(n,i,active?p.liveBits[i]:p.bits[i],state.playing||state.solved)).join('')}${exit.map(x=>`<circle cx="${x}" cy="${flowV2Y(n)}" r="5" fill="#9DC0C4"/>`).join('')}<circle id="flowv2-moving" r="9" cx="180" cy="8" fill="#E98E76" stroke="white" stroke-width="2" style="opacity:0;filter:drop-shadow(0px 2px 3px #37596a20)"/></svg>`;
+  const bins=`<div class="flowv2-cups" style="--bins:${n+1}">${goals.map((arr,i)=>{
+    const good=done&&flowV2Signature([arr])===flowV2Signature([current[i]]);
+    return `<div class="flowv2-cup ${good?'good':''}"><span class="flowv2-cupno">${String(i+1).padStart(2,'0')}</span><div class="flowv2-samples">${flowV2BucketDots(arr)}</div><div class="flowv2-cupactual" id="flowv2-cupactual-${i}">${active?flowV2BucketDots(current[i]):'<span class="flowv2-empty">·</span>'}</div></div>`
+  }).join('')}</div>`;
+  const help=state.stage<=2?'タップで最初の向きを変えよう。玉が通るたび反転する。':state.stage<=6?'玉が来るたび向きが変わる。どの道を通るか予想しよう。':'たった5つの分岐。全ての玉の行き先を予想しよう。';
+  const remaining=p.balls.length-p.cursor;
+  return `<div class="board flowv2-shell"><div class="board-inner"><div class="board-top"><span class="board-label">04 / MARBLE MACHINE</span><span class="rule">${n}つの分岐</span></div><div class="flowv2-scene"><div class="flowv2-stream"><span class="flowv2-cap">IN</span><div class="flowv2-queue" id="flowv2-queue">${p.balls.map((c,i)=>flowV2Dot(c,i<p.cursor?'used':'')).join('')}</div><span class="flowv2-counter" id="flowv2-counter">${p.cursor}/${p.balls.length}</span></div>${board}<div class="flowv2-goallabel"><span>GOAL <b>目標</b></span><span>${active?'NOW / 結果':''}</span></div>${bins}</div><div class="flowv2-hint">${help}</div><div class="flowv2-actions"><button class="mutebtn flowv2-step" data-action="flowstep" ${state.playing||state.solved?'disabled':''}>1球ずつ</button><button class="mainbtn flowv2-run" data-action="${state.playing?'flowskip':'flowrun'}" ${state.solved?'disabled':''}>${state.playing?'結果を見る':'まとめて流す'} <span aria-hidden="true">↗</span></button></div><div class="micro-status" id="micro-status" aria-live="polite">${esc(state.status||(done?'分岐を変えて、もう一度。':'色玉を目標の出口へ。'))}</div><div class="success" id="success" style="display:none"></div></div></div>`;
+};
+function flowV2Clear(p){p.cursor=0;p.liveBins=Array.from({length:p.n+1},()=>[]);p.liveBits=p.bits.slice();p.result=null;p.planned=null;p.runNonce++;}
+toggleFlow=function(i){if(state.solved||state.playing)return;const p=state.flow;p.bits[i]=!p.bits[i];flowV2Clear(p);state.moves++;tone('tap');state.status='';renderBoard()};
+function flowV2Paint(p){
+  for(let i=0;i<p.n;i++){const arrow=document.getElementById('flowv2-arrow-'+i);if(arrow)arrow.textContent=p.liveBits[i]?'↙':'↘'}
+  const dots=document.querySelectorAll('#flowv2-queue .flowv2-dot');dots.forEach((x,i)=>x.classList.toggle('used',i<p.cursor));
+  const counter=document.getElementById('flowv2-counter');if(counter)counter.textContent=p.cursor+'/'+p.balls.length;
+  for(let i=0;i<p.n+1;i++){const el=document.getElementById('flowv2-cupactual-'+i);if(el)el.innerHTML=flowV2BucketDots(p.liveBins[i]);}
+  const label=document.querySelector('.flowv2-goallabel span:last-child');if(label)label.textContent=p.cursor?'NOW / 結果':'';
+}
+function flowV2Tween(el,from,to,duration,p,nonce){
+  return new Promise(resolve=>{
+    if(!el||p.runNonce!==nonce||state.flow!==p){resolve(false);return;}
+    let t0=null;
+    const frame=t=>{
+      if(p.runNonce!==nonce||state.flow!==p||state.screen!=='game'||state.game!=='flow'){resolve(false);return;}
+      if(t0===null)t0=t;const k=Math.min(1,(t-t0)/duration),ease=k*k*(3-2*k);
+      el.setAttribute('cx',(from[0]+(to[0]-from[0])*ease).toFixed(2));el.setAttribute('cy',(from[1]+(to[1]-from[1])*ease).toFixed(2));
+      if(k<1)requestAnimationFrame(frame);else resolve(true);
+    };requestAnimationFrame(frame);
+  });
+}
+async function flowV2One(p,ev,nonce,fast){
+  const dot=document.getElementById('flowv2-moving');if(!dot)return false;
+  const points=[[180,8],...ev.hops.map(h=>FLOW_V2_POS[h.gate]),[flowV2Exits(p.n)[ev.bin],flowV2Y(p.n)]];
+  const speed=fast?95:200;
+  dot.setAttribute('fill',FLOW_V2_COLORS[ev.color]);dot.style.opacity='1';
+  for(let j=0;j<points.length-1;j++){
+    if(!await flowV2Tween(dot,points[j],points[j+1],speed,p,nonce))return false;
+    if(j>=1){const id=ev.hops[j-1].gate;p.liveBits[id]=!p.liveBits[id];flowV2Paint(p);}
+  }
+  dot.style.opacity='0';p.liveBins[ev.bin].push(ev.color);p.cursor++;flowV2Paint(p);return true;
+}
+function flowV2Finish(p){
+  if(state.flow!==p||state.screen!=='game'||state.game!=='flow')return;
+  p.result=p.planned;state.playing=false;
+  const good=p.result.sig===p.goal.sig;
+  renderBoard();
+  if(good){setStatus('目標どおり、全部の玉が到着！');success('一球ごとに向きが変わる。その繰り返しが道を作る。');const action=document.querySelector('.flowv2-run');if(action)action.disabled=true;const step=document.querySelector('.flowv2-step');if(step)step.disabled=true;}
+  else {setStatus('惜しい。玉の順序と、矢印が反転するタイミングを見よう。');tone('no')}
+}
+function flowV2Skip(){const p=state.flow;if(!p||!state.playing)return;p.runNonce++;p.cursor=p.balls.length;p.liveBits=p.planned.finalBits.slice();p.liveBins=p.planned.bins.map(a=>a.slice());flowV2Finish(p)}
+async function flowV2Process(one){
+  const p=state.flow;if(!p||state.solved||state.playing)return;
+  if(p.cursor>=p.balls.length){flowV2Clear(p)}
+  if(!p.planned)p.planned=flowCalc(p.balls,p.bits,p.n);
+  state.playing=true;state.status='';const nonce=++p.runNonce;renderBoard();
+  const start=p.cursor,total=p.balls.length,fast=!one&&state.stage>2;
+  for(let i=start;i<(one?Math.min(start+1,total):total);i++){
+    if(!await flowV2One(p,p.planned.events[i],nonce,fast))return;
+  }
+  if(state.flow!==p||p.runNonce!==nonce)return;
+  if(p.cursor===total)flowV2Finish(p);
+  else{state.playing=false;renderBoard();setStatus('玉が通ると矢印が反転。次の玉はどこへ？')}
+}
+runFlow=function(){flowV2Process(false)};
+function flowV2Step(){flowV2Process(true)}
+const flowV2PreviousBind=bindAll;
+bindAll=function(root=document){flowV2PreviousBind(root);root.querySelectorAll('[data-action="flowstep"]').forEach(b=>b.onclick=flowV2Step);root.querySelectorAll('[data-action="flowskip"]').forEach(b=>b.onclick=flowV2Skip)};
+const flowV2CSS=document.createElement('style');
+flowV2CSS.textContent=`
+.shell:has(.flowv2-shell) .game-head{margin-bottom:4px}.shell:has(.flowv2-shell) .game-head .kicker,.shell:has(.flowv2-shell) .game-head .desc{display:none}
+.shell:has(.flowv2-shell) .game-head h1{font-size:clamp(25px,6.5vw,33px)}.shell:has(.flowv2-shell) .lab-nav{margin-bottom:11px}.shell:has(.flowv2-shell) .stageband{margin:8px 0 7px}.shell:has(.flowv2-shell) .progressline{margin-bottom:9px}
+.flowv2-shell .board-inner{padding:16px 15px 17px}.flowv2-shell .board-top{margin-bottom:6px}.flowv2-scene{padding:8px 6px 12px;border-radius:19px;background:linear-gradient(155deg,#f7fbfa,#f3f9f9)}
+.flowv2-stream{display:flex;align-items:center;justify-content:space-between;gap:7px;min-height:28px;padding:0 7px}.flowv2-cap{font-size:9px;font-weight:900;letter-spacing:.12em;color:#6b9c9f}
+.flowv2-counter{font-size:10px;font-weight:800;color:#6b9c9f;font-variant-numeric:tabular-nums}.flowv2-queue{display:flex;justify-content:center;gap:4px;min-width:0;flex:1}
+.flowv2-dot{width:11px;height:11px;display:inline-block;flex:0 0 auto;border-radius:50%;background:var(--dot);border:1px solid #fff8;box-shadow:inset 0 1.2px 1px #fff8;transition:opacity .2s,transform .2s}.flowv2-dot.used{opacity:.16;transform:scale(.65)}
+.flowv2-svg{display:block;width:100%;max-width:420px;height:auto;margin:0 auto 3px;overflow:visible;touch-action:manipulation}
+.flowv2-wire{fill:none;stroke:#cbdad9;stroke-width:3.1;stroke-linecap:round}.flowv2-rotor{cursor:pointer;touch-action:manipulation}.flowv2-rotor.locked{pointer-events:none}
+.flowv2-halo{fill:#dbeeea;stroke:none;opacity:.58}.flowv2-core{fill:#fff;stroke:#74bfb4;stroke-width:2.5;filter:drop-shadow(0 3px 4px #183d3a12)}.flowv2-arrow{fill:#158f87;font-size:28px;font-weight:700;text-anchor:middle;pointer-events:none}.flowv2-touch{fill:transparent}
+.flowv2-goallabel{display:flex;align-items:center;justify-content:space-between;margin:2px 7px 6px;font-size:9px;font-weight:900;color:#8a9e9e;letter-spacing:.11em}.flowv2-goallabel b{font-size:10px;letter-spacing:0;color:#5a8687}
+.flowv2-cups{display:grid;grid-template-columns:repeat(var(--bins),minmax(0,1fr));gap:4px}.flowv2-cup{min-width:0;padding:7px 2px 5px;border:1px solid #e4eeee;border-radius:12px;background:#fff;text-align:center;display:flex;flex-direction:column;align-items:center;gap:5px;min-height:79px}
+.flowv2-cup.good{border-color:#6abcae;background:#f2fbf6}.flowv2-cupno{font-size:9px;color:#91a9a9;font-weight:800;font-variant-numeric:tabular-nums}
+.flowv2-samples,.flowv2-cupactual{display:flex;justify-content:center;align-content:center;flex-wrap:wrap;gap:2px;width:100%;min-height:12px}.flowv2-samples .flowv2-dot,.flowv2-cupactual .flowv2-dot{width:9px;height:9px}
+.flowv2-cupactual{border-top:1px dashed #d8e6e4;padding-top:5px;min-height:19px}.flowv2-empty{line-height:11px;color:#c4d2d0}
+.flowv2-hint{text-align:center;padding:11px 2px 1px;line-height:1.5;font-size:11px;color:#6e8587;font-weight:700}.flowv2-actions{display:flex;gap:8px;margin-top:11px}
+.flowv2-actions .mainbtn{min-height:49px;padding:12px;font-size:13px}.flowv2-actions .mutebtn{min-height:49px;min-width:92px;padding:9px 12px;font-size:12px;background:#ecf5f4;border-color:#d5e6e3;color:#297d77}
+.flowv2-shell .micro-status{min-height:17px;font-size:10px;margin-top:8px}.flowv2-shell .success{margin-top:10px}
+@media(max-width:360px){.flowv2-shell .board-inner{padding:13px 10px}.flowv2-scene{padding:8px 4px 9px}.flowv2-dot{width:9px;height:9px}.flowv2-queue{gap:3px}.flowv2-cup{padding-left:1px;padding-right:1px}.flowv2-samples .flowv2-dot,.flowv2-cupactual .flowv2-dot{width:8px;height:8px}}
+@media(prefers-reduced-motion:reduce){.flowv2-dot{transition:none}}
+`;
+document.head.appendChild(flowV2CSS);
+
 window.__BD_TEST__={graphCore,makePeel,distTriple,makeTriple,makeExperiment,flowCalc,makeFlow};
 showHome();
 </script>
